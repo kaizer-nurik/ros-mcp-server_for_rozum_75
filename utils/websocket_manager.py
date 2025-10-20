@@ -1,11 +1,10 @@
+import base64
 import json
+import os
 import threading
 from typing import Optional, Union, Tuple
 import base64
 import numpy as np
-import cv2
-import os
-
 import websocket
 
 
@@ -32,7 +31,7 @@ def parse_json(raw: Optional[Union[str, bytes]]) -> Optional[dict]:
 
 def parse_image(raw: Optional[Union[str, bytes]]) -> Tuple[Optional[dict],bool]:
     """
-    Decode a image message (json with base64 data) and save as PNG.
+    Decode an image message (json with base64 data) and save it as JPEG.
 
     Args:
         raw: JSON string, bytes, or None

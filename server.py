@@ -1,13 +1,11 @@
+import argparse
+import io
 import json
-import time
 import os
-from typing import Optional, List, Dict, Any
+import time
+from typing import Any, Dict, List, Optional, Union
 
 from fastmcp import FastMCP
-
-from utils.websocket_manager import WebSocketManager, parse_json, parse_image
-from utils.network_utils import ping_ip_and_port
-
 from fastmcp.utilities.types import Image
 from PIL import Image as PILImage
 
@@ -27,6 +25,19 @@ ROSBRIDGE_PORT = (
     9090  # Rosbridge default is 9090. Replace with your rosbridge port or set using the LLM.
 )
 
+# MCP transport settings
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()  # Default is stdio.
+
+# MCP connection settings (streamable-http)
+MCP_HOST = os.getenv(
+    "MCP_HOST", "127.0.0.1"
+)  # Default is localhost. Replace with the address of your remote MCP server.
+
+# MCP port settings (default=9000)
+MCP_PORT = int(
+    os.getenv("MCP_PORT", "9000")
+)  # Default is 9000. Replace with the port of your remote MCP server.
+
 # Initialize MCP server and WebSocket manager
 mcp = FastMCP("ros-mcp-server")
 ws_manager = WebSocketManager(
@@ -34,10 +45,48 @@ ws_manager = WebSocketManager(
 )  # Increased default timeout for ROS operations
 
 
-@mcp.tool(description=("Connect to a robot by setting IP/port and testing connectivity."))
+@mcp.tool(description=("Get robot configuration from YAML file."))
+def get_robot_config(name: str) -> dict:
+    """
+    Get the robot configuration from the YAML file for connecting to the robot and knowing its capabilities.
+
+    Returns:
+        dict: The robot configuration.
+    """
+    robot_config = parse_robot_config(name)
+
+    if len(robot_config) > 1:
+        return {
+            "error": f"Multiple configurations found for robot '{name}'. Please specify a more precise name."
+        }
+    elif not robot_config:
+        return {
+            "error": f"No configuration found for robot '{name}'. Please check the name and try again. Or you can set the IP/port manually using the 'connect_to_robot' tool."
+        }
+    return {"robot_config": robot_config}
+
+
+@mcp.tool(
+    description=("List all available robot specifications that can be used with get_robot_config.")
+)
+def list_verified_robot_specifications() -> dict:
+    """
+    Get a list of all available robot specification files.
+
+    Returns:
+        dict: List of available robot names that can be used with get_robot_config.
+    """
+    return get_robot_specifications()
+
+
+@mcp.tool(
+    description=(
+        "After getting the robot config, connect to the robot by setting the IP/port and testing connectivity."
+    )
+)
 def connect_to_robot(
     ip: Optional[str] = None,
-    port: Optional[int] = None,
+    port: Optional[Union[int, str]] = None,
     ping_timeout: float = 2.0,
     port_timeout: float = 2.0,
 ) -> dict:
@@ -55,7 +104,7 @@ def connect_to_robot(
     """
     # Set default values if None
     actual_ip = ip if ip is not None else "127.0.0.1"
-    actual_port = port if port is not None else 9090
+    actual_port = int(port) if port is not None else 9090
 
     # Set the IP and port
     ws_manager.set_ip(actual_ip, actual_port)
@@ -68,6 +117,41 @@ def connect_to_robot(
         "message": f"WebSocket IP set to {actual_ip}:{actual_port}",
         "connectivity_test": ping_result,
     }
+
+
+@mcp.tool(description="Detect the ROS version and distribution via rosbridge.")
+def detect_ros_version() -> dict:
+    """
+    Detects the ROS version and distro via rosbridge WebSocket.
+    Returns:
+        dict: {'version': <version or '1'>, 'distro': <distro>} or error info.
+    """
+    # Try ROS2 detection
+    ros2_request = {
+        "op": "call_service",
+        "id": "ros2_version_check",
+        "service": "/rosapi/get_ros_version",
+        "args": {},
+    }
+    with ws_manager:
+        response = ws_manager.request(ros2_request)
+        values = response.get("values") if response else None
+        if isinstance(values, dict) and "version" in values:
+            return {"version": values.get("version"), "distro": values.get("distro")}
+        # Fallback to ROS1 detection
+        ros1_request = {
+            "op": "call_service",
+            "id": "ros1_distro_check",
+            "service": "/rosapi/get_param",
+            "args": {"name": "/rosdistro"},
+        }
+        response = ws_manager.request(ros1_request)
+        value = response.get("values") if response else None
+        if value:
+            distro = value.get("value") if isinstance(value, dict) else value
+            distro_clean = str(distro).strip('"').replace("\\n", "").replace("\n", "")
+            return {"version": "1", "distro": distro_clean}
+        return {"error": "Could not detect ROS version"}
 
 
 @mcp.tool(description=("Fetch available topics from the ROS bridge.\nExample:\nget_topics()"))
@@ -317,6 +401,96 @@ def get_subscribers_for_topic(topic: str) -> dict:
 
 @mcp.tool(
     description=(
+        "Get comprehensive information about all ROS topics including publishers, subscribers, and message types. Note that this may take time to execute when three are a large number of topics since it queries each one by one under the hood. \n"
+        "Example:\n"
+        "inspect_all_topics()"
+    )
+)
+def inspect_all_topics() -> dict:
+    """
+    Get comprehensive information about all ROS topics including publishers, subscribers, and message types.
+
+    Returns:
+        dict: Contains detailed information about all topics including:
+            - Topic names and message types
+            - Publishers for each topic
+            - Subscribers for each topic
+            - Connection counts and statistics
+    """
+    # First get all topics
+    topics_message = {
+        "op": "call_service",
+        "service": "/rosapi/topics",
+        "type": "rosapi/Topics",
+        "args": {},
+        "id": "inspect_all_topics_request_1",
+    }
+
+    with ws_manager:
+        topics_response = ws_manager.request(topics_message)
+
+        if not topics_response or "values" not in topics_response:
+            return {"error": "Failed to get topics list"}
+
+        topics = topics_response["values"].get("topics", [])
+        types = topics_response["values"].get("types", [])
+        topic_details = {}
+
+        # Get details for each topic
+        topic_errors = []
+        for i, topic in enumerate(topics):
+            # Get topic type
+            topic_type = types[i] if i < len(types) else "unknown"
+
+            # Get publishers for this topic
+            publishers_message = {
+                "op": "call_service",
+                "service": "/rosapi/publishers",
+                "type": "rosapi/Publishers",
+                "args": {"topic": topic},
+                "id": f"get_publishers_{topic.replace('/', '_')}",
+            }
+
+            publishers_response = ws_manager.request(publishers_message)
+            publishers = []
+            if publishers_response and "values" in publishers_response:
+                publishers = publishers_response["values"].get("publishers", [])
+            elif publishers_response and "error" in publishers_response:
+                topic_errors.append(f"Topic {topic} publishers: {publishers_response['error']}")
+
+            # Get subscribers for this topic
+            subscribers_message = {
+                "op": "call_service",
+                "service": "/rosapi/subscribers",
+                "type": "rosapi/Subscribers",
+                "args": {"topic": topic},
+                "id": f"get_subscribers_{topic.replace('/', '_')}",
+            }
+
+            subscribers_response = ws_manager.request(subscribers_message)
+            subscribers = []
+            if subscribers_response and "values" in subscribers_response:
+                subscribers = subscribers_response["values"].get("subscribers", [])
+            elif subscribers_response and "error" in subscribers_response:
+                topic_errors.append(f"Topic {topic} subscribers: {subscribers_response['error']}")
+
+            topic_details[topic] = {
+                "type": topic_type,
+                "publishers": publishers,
+                "subscribers": subscribers,
+                "publisher_count": len(publishers),
+                "subscriber_count": len(subscribers),
+            }
+
+        return {
+            "total_topics": len(topics),
+            "topics": topic_details,
+            "topic_errors": topic_errors,  # Include any errors encountered during inspection
+        }
+
+
+@mcp.tool(
+    description=(
         "Subscribe to a ROS topic and return the first message received.\n"
         "Example:\n"
         "subscribe_once(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped')\n"
@@ -414,7 +588,9 @@ def subscribe_once(
                         if len(msg_data["msg"]['messages'][0]['data']) >100:
                             msg_data["msg"]['data'] = "data is too big to send"
                 if "Image" in msg_type:
-                    return {"message": "Image received successfully and saved in the MCP server. Run the 'analyze_image' tool to analyze it"}
+                    return {
+                        "message": "Image received successfully and saved in the MCP server. Run the 'analyze_previously_received_image' tool to analyze it"
+                    }
                 else:
                     return {"msg": {}}#msg_data.get("msg", {})}
 
@@ -610,7 +786,10 @@ def publish_once(topic: str = "", msg_type: str = "", msg: dict = {}) -> dict:
     )
 )
 def publish_for_durations(
-    topic: str = "", msg_type: str = "", messages: List[Dict[str, Any]] = [], durations: List[float] = []
+    topic: str = "",
+    msg_type: str = "",
+    messages: List[Dict[str, Any]] = [],
+    durations: List[float] = [],
 ) -> dict:
     """
     Publish a sequence of messages to a given ROS topic with delays in between.
@@ -892,11 +1071,11 @@ def get_service_providers(service: str) -> dict:
     if not service or not service.strip():
         return {"error": "Service name cannot be empty"}
 
-    # rosbridge service call to get service providers
+    # rosbridge service call to get service providers (using service_node like inspect_all_services)
     message = {
         "op": "call_service",
-        "service": "/rosapi/service_providers",
-        "type": "rosapi/ServiceProviders",
+        "service": "/rosapi/service_node",
+        "type": "rosapi/ServiceNode",
         "args": {"service": service},
         "id": f"get_service_providers_request_{service.replace('/', '_')}",
     }
@@ -905,17 +1084,34 @@ def get_service_providers(service: str) -> dict:
     with ws_manager:
         response = ws_manager.request(message)
 
-    # Return service providers if present
-    if response and "values" in response:
-        providers = response["values"].get("providers", [])
-        return {"service": service, "providers": providers, "provider_count": len(providers)}
+    # Return service providers if present (using same logic as inspect_all_services)
+    providers = []
+
+    # Handle different response formats safely
+    if response and isinstance(response, dict):
+        if "values" in response:
+            node = response["values"].get("node", "")
+            if node:
+                providers = [node]
+        elif "result" in response:
+            node = response["result"].get("node", "")
+            if node:
+                providers = [node]
+        elif "error" in response:
+            return {"error": f"Service call failed: {response['error']}"}
+    elif response is False:
+        return {"error": f"No response received for service {service}"}
+    elif response is True:
+        return {"error": f"Unexpected boolean response for service {service}"}
     else:
         return {"error": f"Failed to get providers for service {service}"}
+
+    return {"service": service, "providers": providers, "provider_count": len(providers)}
 
 
 @mcp.tool(
     description=(
-        "Get comprehensive information about all services including types and providers.\n"
+        "Get comprehensive information about all services including types and providers. Note that this may take time to execute when three are a large number of services since it queries each one by one under the hood. \n"
         "Example:\n"
         "inspect_all_services()"
     )
@@ -965,21 +1161,36 @@ def inspect_all_services() -> dict:
             elif type_response and "error" in type_response:
                 service_errors.append(f"Service {service}: {type_response['error']}")
 
-            # Get service providers
-            providers_message = {
+            # Get service provider (using service_node instead of service_providers)
+            provider_message = {
                 "op": "call_service",
-                "service": "/rosapi/service_providers",
-                "type": "rosapi/ServiceProviders",
+                "service": "/rosapi/service_node",
+                "type": "rosapi/ServiceNode",
                 "args": {"service": service},
-                "id": f"get_providers_{service.replace('/', '_')}",
+                "id": f"get_provider_{service.replace('/', '_')}",
             }
 
-            providers_response = ws_manager.request(providers_message)
+            provider_response = ws_manager.request(provider_message)
             providers = []
-            if providers_response and "values" in providers_response:
-                providers = providers_response["values"].get("providers", [])
-            elif providers_response and "error" in providers_response:
-                service_errors.append(f"Service {service} providers: {providers_response['error']}")
+
+            # Handle different response formats safely
+            if provider_response and isinstance(provider_response, dict):
+                if "values" in provider_response:
+                    node = provider_response["values"].get("node", "")
+                    if node:
+                        providers = [node]
+                elif "result" in provider_response:
+                    node = provider_response["result"].get("node", "")
+                    if node:
+                        providers = [node]
+                elif "error" in provider_response:
+                    service_errors.append(
+                        f"Service {service} provider: {provider_response['error']}"
+                    )
+            elif provider_response is False:
+                service_errors.append(f"Service {service} provider: No response received")
+            elif provider_response is True:
+                service_errors.append(f"Service {service} provider: Unexpected boolean response")
 
             service_details[service] = {
                 "type": service_type,
@@ -1074,6 +1285,202 @@ def call_service(
             "service_type": service_type,
             "success": False,
             "error": "No response received from service call",
+        }
+
+
+@mcp.tool(description=("Get list of all currently running ROS nodes.\nExample:\nget_nodes()"))
+def get_nodes() -> dict:
+    """
+    Get list of all currently running ROS nodes.
+
+    Returns:
+        dict: Contains list of all active nodes,
+            or a message string if no nodes are found.
+    """
+    # rosbridge service call to get node list
+    message = {
+        "op": "call_service",
+        "service": "/rosapi/nodes",
+        "type": "rosapi/Nodes",
+        "args": {},
+        "id": "get_nodes_request_1",
+    }
+
+    # Request node list from rosbridge
+    with ws_manager:
+        response = ws_manager.request(message)
+
+    # Check for service response errors first
+    if response and "result" in response and not response["result"]:
+        # Service call failed - return error with details from values
+        error_msg = response.get("values", {}).get("message", "Service call failed")
+        return {"error": f"Service call failed: {error_msg}"}
+
+    # Return node info if present
+    if response and "values" in response:
+        nodes = response["values"].get("nodes", [])
+        return {"nodes": nodes, "node_count": len(nodes)}
+    else:
+        return {"warning": "No nodes found"}
+
+
+@mcp.tool(
+    description=(
+        "Get detailed information about a specific node including its publishers, subscribers, and services.\n"
+        "Example:\n"
+        "get_node_details('/turtlesim')"
+    )
+)
+def get_node_details(node: str) -> dict:
+    """
+    Get detailed information about a specific node including its publishers, subscribers, and services.
+
+    Args:
+        node (str): The node name (e.g., '/turtlesim')
+
+    Returns:
+        dict: Contains detailed node information including publishers, subscribers, and services,
+            or an error message if node doesn't exist.
+    """
+    # Validate input
+    if not node or not node.strip():
+        return {"error": "Node name cannot be empty"}
+
+    result = {
+        "node": node,
+        "publishers": [],
+        "subscribers": [],
+        "services": [],
+        "publisher_count": 0,
+        "subscriber_count": 0,
+        "service_count": 0,
+    }
+
+    # rosbridge service call to get node details
+    message = {
+        "op": "call_service",
+        "service": "/rosapi/node_details",
+        "type": "rosapi/NodeDetails",
+        "args": {"node": node},
+        "id": f"get_node_details_{node.replace('/', '_')}",
+    }
+
+    # Request node details from rosbridge
+    with ws_manager:
+        response = ws_manager.request(message)
+
+    # Check for service response errors first
+    if response and "result" in response and not response["result"]:
+        # Service call failed - return error with details from values
+        error_msg = response.get("values", {}).get("message", "Service call failed")
+        return {"error": f"Service call failed: {error_msg}"}
+
+    # Extract data from the response
+    if response and "values" in response:
+        values = response["values"]
+        # Extract publishers, subscribers, and services from the response
+        # Note: rosapi uses "publishing" and "subscribing" field names
+        publishers = values.get("publishing", [])
+        subscribers = values.get("subscribing", [])
+        services = values.get("services", [])
+
+        result["publishers"] = publishers
+        result["subscribers"] = subscribers
+        result["services"] = services
+        result["publisher_count"] = len(publishers)
+        result["subscriber_count"] = len(subscribers)
+        result["service_count"] = len(services)
+
+    # Check if we got any data
+    if not result["publishers"] and not result["subscribers"] and not result["services"]:
+        return {"error": f"Node {node} not found or has no details available"}
+
+    return result
+
+
+@mcp.tool(
+    description=(
+        "Get comprehensive information about all ROS nodes including their publishers, subscribers, and services.\n"
+        "Example:\n"
+        "inspect_all_nodes()"
+    )
+)
+def inspect_all_nodes() -> dict:
+    """
+    Get comprehensive information about all ROS nodes including their publishers, subscribers, and services.
+
+    Returns:
+        dict: Contains detailed information about all nodes including:
+            - Node names and details
+            - Publishers for each node
+            - Subscribers for each node
+            - Services provided by each node
+            - Connection counts and statistics
+    """
+    # First get all nodes
+    nodes_message = {
+        "op": "call_service",
+        "service": "/rosapi/nodes",
+        "type": "rosapi/Nodes",
+        "args": {},
+        "id": "inspect_all_nodes_request_1",
+    }
+
+    with ws_manager:
+        nodes_response = ws_manager.request(nodes_message)
+
+        if not nodes_response or "values" not in nodes_response:
+            return {"error": "Failed to get nodes list"}
+
+        nodes = nodes_response["values"].get("nodes", [])
+        node_details = {}
+
+        # Get details for each node
+        node_errors = []
+        for node in nodes:
+            # Get node details (publishers, subscribers, services)
+            node_details_message = {
+                "op": "call_service",
+                "service": "/rosapi/node_details",
+                "type": "rosapi/NodeDetails",
+                "args": {"node": node},
+                "id": f"get_node_details_{node.replace('/', '_')}",
+            }
+
+            node_details_response = ws_manager.request(node_details_message)
+
+            if node_details_response and "values" in node_details_response:
+                values = node_details_response["values"]
+                # Extract publishers, subscribers, and services from the response
+                # Note: rosapi uses "publishing" and "subscribing" field names
+                publishers = values.get("publishing", [])
+                subscribers = values.get("subscribing", [])
+                services = values.get("services", [])
+
+                node_details[node] = {
+                    "publishers": publishers,
+                    "subscribers": subscribers,
+                    "services": services,
+                    "publisher_count": len(publishers),
+                    "subscriber_count": len(subscribers),
+                    "service_count": len(services),
+                }
+            elif (
+                node_details_response
+                and "result" in node_details_response
+                and not node_details_response["result"]
+            ):
+                error_msg = node_details_response.get("values", {}).get(
+                    "message", "Service call failed"
+                )
+                node_errors.append(f"Node {node}: {error_msg}")
+            else:
+                node_errors.append(f"Node {node}: Failed to get node details")
+
+        return {
+            "total_nodes": len(nodes),
+            "nodes": node_details,
+            "node_errors": node_errors,  # Include any errors encountered during inspection
         }
 
 
