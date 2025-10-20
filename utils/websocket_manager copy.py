@@ -1,15 +1,15 @@
-import json
-import threading
-from typing import Optional, Union, Tuple
 import base64
-import numpy as np
-import cv2
+import json
 import os
+import threading
+from typing import Union
 
+import cv2
+import numpy as np
 import websocket
 
 
-def parse_json(raw: Optional[Union[str, bytes]]) -> Optional[dict]:
+def parse_json(raw: Union[str, bytes] | None) -> dict | None:
     """
     Safely parse JSON from string or bytes.
 
@@ -30,34 +30,105 @@ def parse_json(raw: Optional[Union[str, bytes]]) -> Optional[dict]:
         return None
 
 
-def parse_image(raw: Optional[Union[str, bytes]]) -> Tuple[Optional[dict],bool]:
+def is_image_like(msg_content: dict) -> bool:
     """
-    Decode a image message (json with base64 data) and save as PNG.
+    Check if a message looks like an image message by examining its fields.
+
+    This checks for image-specific fields (width, height, encoding) in addition
+    to the data field to distinguish images from other messages that may contain
+    binary data (e.g., PointCloud2, ByteMultiArray).
+
+    Args:
+        msg_content: The message content dictionary
+
+    Returns:
+        bool: True if the message appears to be an image, False otherwise
+    """
+    if not isinstance(msg_content, dict):
+        return False
+
+    # Check for CompressedImage format (has 'data' and 'format' fields)
+    if "data" in msg_content and "format" in msg_content:
+        format_str = msg_content.get("format", "").lower()
+        if any(fmt in format_str for fmt in ["jpeg", "jpg", "png"]):
+            return True
+
+    # Check for raw Image format (has 'data', 'width', 'height', 'encoding')
+    required_fields = {"data", "width", "height", "encoding"}
+    if not required_fields.issubset(msg_content.keys()):
+        return False
+
+    # Validate field types
+    if not isinstance(msg_content.get("width"), int) or not isinstance(
+        msg_content.get("height"), int
+    ):
+        return False
+
+    # Check for valid image encodings (sensor_msgs/Image standard encodings)
+    encoding = msg_content.get("encoding", "").lower()
+    valid_encodings = [
+        "rgb8",
+        "rgba8",
+        "bgr8",
+        "bgra8",
+        "mono8",
+        "mono16",
+        "8uc1",
+        "8uc3",
+        "8uc4",
+        "16uc1",
+        "bayer",
+        "yuv",
+    ]
+    if not any(enc in encoding for enc in valid_encodings):
+        return False
+
+    return True
+
+
+def parse_image(raw: Union[str, bytes] | None) -> dict | None:
+    """
+    Decode an image message (json with base64 data) and save it as JPEG.
 
     Args:
         raw: JSON string, bytes, or None
 
     Returns:
         Parsed dict if successful, None if raw is None, parsing fails, or result is not a dict
-        bool if file was saved
     """
 
     if raw is None:
-        return None, False
+        return None
 
     try:
         result = json.loads(raw)
         msg = result["msg"]
     except (json.JSONDecodeError, KeyError):
         print("[Image] Invalid JSON or missing 'msg' field.")
-        return None, False
+        return None
 
-    height, width, encoding = msg.get("height"), msg.get("width"), msg.get("encoding")
     data_b64 = msg.get("data")
+    if not data_b64:
+        print("[Image] Missing 'data' field in message.")
+        return None
 
-    if not all([height, width, encoding, data_b64]):
-        print("[Image] Missing required fields in message.")
-        return None, False
+    # ✅ Ensure output directory exists
+    os.makedirs("./camera", exist_ok=True)
+
+    # Case 1: CompressedImage (already JPEG/PNG encoded)
+    if "format" in msg and msg["format"].lower() in ["jpeg", "jpg", "png"]:
+        image_bytes = base64.b64decode(data_b64)
+        path = "./camera/received_image.jpeg"
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        print(f"[Image] Saved CompressedImage to {path}")
+        return result if isinstance(result, dict) else None
+
+    # Case 2: Raw Image (rgb8, bgr8, mono8)
+    height, width, encoding = msg.get("height"), msg.get("width"), msg.get("encoding")
+    if not all([height, width, encoding]):
+        print("[Image] Missing required fields for raw image.")
+        return None
 
     # Decode base64 to numpy array
     image_bytes = base64.b64decode(data_b64)
@@ -72,25 +143,70 @@ def parse_image(raw: Optional[Union[str, bytes]]) -> Tuple[Optional[dict],bool]:
             img_cv = img_np.reshape((height, width, 3))
         elif encoding == "mono8":
             img_cv = img_np.reshape((height, width))
-        elif encoding == "16UC1":
-            # Depth image with 16-bit unsigned integers (millimeters)
-            img_np = np.frombuffer(image_bytes, dtype=np.uint16)
-            img_cv = img_np.reshape((height, width))
         else:
             print(f"[Image] Unsupported encoding: {encoding}")
-            return None, False
+            return None
     except ValueError as e:
         print(f"[Image] Reshape error: {e}")
-        return None, False
-    
-    if not os.path.exists("./camera"):
-        os.makedirs("./camera")
+        return None
 
-    success = cv2.imwrite("./camera/received_image.png", img_cv)
+    # Save as JPEG with quality 95
+    success = cv2.imwrite("./camera/received_image.jpeg", img_cv, [cv2.IMWRITE_JPEG_QUALITY, 95])
     if success:
-        return (result,True) if isinstance(result, dict) else (None, False)
+        print("[Image] Saved raw Image to ./camera/received_image.jpeg")
+        return result if isinstance(result, dict) else None
     else:
+        return None
+
+
+def parse_input(
+    raw: Union[str, bytes] | None, expects_image: bool | None = None
+) -> tuple[dict | None, bool]:
+    """
+    Parse input data with optional image hint for optimized handling.
+
+    This function determines the parsing strategy based on the expects_image hint:
+    - If expects_image=True: prioritize image parsing, fall back to JSON
+    - If expects_image=False: parse as JSON only (faster for non-image data)
+    - If expects_image=None: auto-detect based on message structure
+
+    Args:
+        raw: JSON string, bytes, or None
+        expects_image: Optional hint about whether to expect image data
+
+    Returns:
+        tuple: (parsed_data, was_parsed_as_image)
+            - parsed_data: Parsed dict if successful, None otherwise
+            - was_parsed_as_image: True if data was successfully parsed as image
+    """
+    if raw is None:
         return None, False
+
+    # Step 1: Auto-detect mode if not explicitly specified
+    if expects_image is None:
+        # Try to parse as JSON first to check structure
+        temp_parsed = parse_json(raw)
+        if temp_parsed and isinstance(temp_parsed, dict) and temp_parsed.get("op") == "publish":
+            msg_content = temp_parsed.get("msg", {})
+            expects_image = is_image_like(msg_content)
+        else:
+            expects_image = False
+
+    # Step 2: Parse based on expected type with graceful fallback
+    if expects_image:
+        # Try image parsing first
+        result = parse_image(raw)
+        if result is not None:
+            return result, True
+        else:
+            # Fallback to JSON if image parsing failed
+            result = parse_json(raw)
+            return result, False
+    else:
+        # Parse as JSON (faster for non-image data)
+        result = parse_json(raw)
+        return result, False
+
 
 class WebSocketManager:
     def __init__(self, ip: str, port: int, default_timeout: float = 2.0):
@@ -108,7 +224,7 @@ class WebSocketManager:
         self.port = port
         print(f"[WebSocket] IP set to {self.ip}:{self.port}")
 
-    def connect(self) -> Optional[str]:
+    def connect(self) -> str | None:
         """
         Attempt to establish a WebSocket connection.
 
@@ -130,7 +246,7 @@ class WebSocketManager:
                     return error_msg
             return None  # already connected, no error
 
-    def send(self, message: dict) -> Optional[str]:
+    def send(self, message: dict) -> str | None:
         """
         Send a JSON-serializable message over WebSocket.
 
@@ -161,16 +277,16 @@ class WebSocketManager:
 
             return "[WebSocket] Not connected, send aborted."
 
-    def receive(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
+    def receive(self, timeout: float | None = None) -> Union[str, bytes] | None:
         """
         Receive a single message from rosbridge within the given timeout.
 
         Args:
-            timeout (Optional[float]): Seconds to wait before timing out.
+            timeout (float | None): Seconds to wait before timing out.
                                      If None, uses the default timeout.
 
         Returns:
-            Optional[str]: JSON string received from rosbridge, or None if timeout/error.
+            str | None: JSON string received from rosbridge, or None if timeout/error.
         """
         with self.lock:
             self.connect()
@@ -188,13 +304,13 @@ class WebSocketManager:
                     return None
             return None
 
-    def request(self, message: dict, timeout: Optional[float] = None) -> dict:
+    def request(self, message: dict, timeout: float | None = None) -> dict:
         """
         Send a request to Rosbridge and return the response.
 
         Args:
             message (dict): The Rosbridge message dictionary to send.
-            timeout (Optional[float]): Seconds to wait for a response.
+            timeout (float | None): Seconds to wait for a response.
                                      If None, uses the default timeout.
 
         Returns:
@@ -213,8 +329,8 @@ class WebSocketManager:
         if response is None:
             return {"error": "no response or timeout from rosbridge"}
 
-        # Attempt to parse JSON
-        parsed_response = parse_json(response)
+        # Attempt to parse response (auto-detect images, but services rarely return images)
+        parsed_response, _ = parse_input(response, expects_image=None)
         if parsed_response is None:
             print(f"[WebSocket] JSON decode error for response: {response}")
             return {"error": "invalid_json", "raw": response}

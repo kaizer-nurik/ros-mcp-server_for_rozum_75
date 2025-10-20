@@ -11,6 +11,16 @@ from utils.network_utils import ping_ip_and_port
 from fastmcp.utilities.types import Image
 from PIL import Image as PILImage
 
+
+import os
+
+proxy = ''
+
+os.environ['http_proxy'] = proxy 
+os.environ['HTTP_PROXY'] = proxy
+os.environ['https_proxy'] = proxy
+os.environ['HTTPS_PROXY'] = proxy
+
 # ROS bridge connection settings
 ROSBRIDGE_IP = "127.0.0.1"  # Default is localhost. Replace with your local IPor set using the LLM.
 ROSBRIDGE_PORT = (
@@ -311,7 +321,7 @@ def get_subscribers_for_topic(topic: str) -> dict:
         "Example:\n"
         "subscribe_once(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped')\n"
         "subscribe_once(topic='/slow_topic', msg_type='my_package/SlowMsg', timeout=10.0)  # Specify timeout only if topic publishes infrequently\n"
-        "subscribe_once(topic='/high_rate_topic', msg_type='sensor_msgs/Image', queue_length=5, throttle_rate_ms=100)  # Control message buffering and rate"
+        "DON'T USE IT TO GET IMAGE! USE get_image() AND get_depth_image() INSTEAD!\n"
     )
 )
 def subscribe_once(
@@ -323,6 +333,7 @@ def subscribe_once(
 ) -> dict:
     """
     Subscribe to a given ROS topic via rosbridge and return the first message received.
+    DON'T USE IT TO GET IMAGE! USE get_image() AND get_depth_image() INSTEAD!
 
     Args:
         topic (str): The ROS topic name (e.g., "/cmd_vel", "/joint_states").
@@ -382,6 +393,7 @@ def subscribe_once(
 
             if "Image" in msg_type:
                 msg_data = parse_image(response)
+                # return {"message": "Image received successfully and saved in the MCP server. Run the 'analyze_image' tool to analyze it"}
             else:
                 msg_data = parse_json(response)
 
@@ -397,10 +409,14 @@ def subscribe_once(
                 # Unsubscribe before returning the message
                 unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
                 ws_manager.send(unsubscribe_msg)
+                if len(msg_data["msg"]['messages'])>0:
+                    if 'data' in msg_data["msg"]['messages'][0]:
+                        if len(msg_data["msg"]['messages'][0]['data']) >100:
+                            msg_data["msg"]['data'] = "data is too big to send"
                 if "Image" in msg_type:
                     return {"message": "Image received successfully and saved in the MCP server. Run the 'analyze_image' tool to analyze it"}
                 else:
-                    return {"msg": msg_data.get("msg", {})}
+                    return {"msg": {}}#msg_data.get("msg", {})}
 
         # Timeout - unsubscribe and return error
         unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
@@ -484,106 +500,106 @@ def publish_once(topic: str = "", msg_type: str = "", msg: dict = {}) -> dict:
     }
 
 
-@mcp.tool(
-    description=(
-        "Subscribe to a topic for a duration and collect messages.\n"
-        "Example:\n"
-        "subscribe_for_duration(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', duration=5, max_messages=10)\n"
-        "subscribe_for_duration(topic='/high_rate_topic', msg_type='sensor_msgs/Image', duration=10, queue_length=5, throttle_rate_ms=100)  # Control message buffering and rate"
-    )
-)
-def subscribe_for_duration(
-    topic: str = "",
-    msg_type: str = "",
-    duration: float = 5.0,
-    max_messages: int = 100,
-    queue_length: Optional[int] = None,
-    throttle_rate_ms: Optional[int] = None,
-) -> dict:
-    """
-    Subscribe to a ROS topic via rosbridge for a fixed duration and collect messages.
+# @mcp.tool(
+#     description=(
+#         "Subscribe to a topic for a duration and collect messages.\n"
+#         "Example:\n"
+#         "subscribe_for_duration(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', duration=5, max_messages=10)\n"
+#         "subscribe_for_duration(topic='/high_rate_topic', msg_type='sensor_msgs/Image', duration=10, queue_length=5, throttle_rate_ms=100)  # Control message buffering and rate"
+#     )
+# )
+# def subscribe_for_duration(
+#     topic: str = "",
+#     msg_type: str = "",
+#     duration: float = 5.0,
+#     max_messages: int = 100,
+#     queue_length: Optional[int] = None,
+#     throttle_rate_ms: Optional[int] = None,
+# ) -> dict:
+#     """
+#     Subscribe to a ROS topic via rosbridge for a fixed duration and collect messages.
 
-    Args:
-        topic (str): ROS topic name (e.g. "/cmd_vel", "/joint_states")
-        msg_type (str): ROS message type (e.g. "geometry_msgs/Twist")
-        duration (float): How long (seconds) to listen for messages
-        max_messages (int): Maximum number of messages to collect before stopping
-        queue_length (Optional[int]): How many messages to buffer before dropping old ones. Must be ≥ 1.
-        throttle_rate_ms (Optional[int]): Minimum interval between messages in milliseconds. Must be ≥ 0.
+#     Args:
+#         topic (str): ROS topic name (e.g. "/cmd_vel", "/joint_states")
+#         msg_type (str): ROS message type (e.g. "geometry_msgs/Twist")
+#         duration (float): How long (seconds) to listen for messages
+#         max_messages (int): Maximum number of messages to collect before stopping
+#         queue_length (Optional[int]): How many messages to buffer before dropping old ones. Must be ≥ 1.
+#         throttle_rate_ms (Optional[int]): Minimum interval between messages in milliseconds. Must be ≥ 0.
 
-    Returns:
-        dict:
-            {
-                "topic": topic_name,
-                "collected_count": N,
-                "messages": [msg1, msg2, ...]
-            }
-    """
-    # Validate critical args before subscribing
-    if not topic or not msg_type:
-        return {"error": "Missing required arguments: topic and msg_type must be provided."}
+#     Returns:
+#         dict:
+#             {
+#                 "topic": topic_name,
+#                 "collected_count": N,
+#                 "messages": [msg1, msg2, ...]
+#             }
+#     """
+#     # Validate critical args before subscribing
+#     if not topic or not msg_type:
+#         return {"error": "Missing required arguments: topic and msg_type must be provided."}
 
-    # Validate optional parameters
-    if queue_length is not None and (not isinstance(queue_length, int) or queue_length < 1):
-        return {"error": "queue_length must be an integer ≥ 1"}
+#     # Validate optional parameters
+#     if queue_length is not None and (not isinstance(queue_length, int) or queue_length < 1):
+#         return {"error": "queue_length must be an integer ≥ 1"}
 
-    if throttle_rate_ms is not None and (
-        not isinstance(throttle_rate_ms, int) or throttle_rate_ms < 0
-    ):
-        return {"error": "throttle_rate_ms must be an integer ≥ 0"}
+#     if throttle_rate_ms is not None and (
+#         not isinstance(throttle_rate_ms, int) or throttle_rate_ms < 0
+#     ):
+#         return {"error": "throttle_rate_ms must be an integer ≥ 0"}
 
-    # Send subscription request
-    subscribe_msg: dict = {
-        "op": "subscribe",
-        "topic": topic,
-        "type": msg_type,
-    }
+#     # Send subscription request
+#     subscribe_msg: dict = {
+#         "op": "subscribe",
+#         "topic": topic,
+#         "type": msg_type,
+#     }
 
-    # Add optional parameters if provided
-    if queue_length is not None:
-        subscribe_msg["queue_length"] = queue_length
+#     # Add optional parameters if provided
+#     if queue_length is not None:
+#         subscribe_msg["queue_length"] = queue_length
 
-    if throttle_rate_ms is not None:
-        subscribe_msg["throttle_rate"] = throttle_rate_ms
+#     if throttle_rate_ms is not None:
+#         subscribe_msg["throttle_rate"] = throttle_rate_ms
 
-    with ws_manager:
-        send_error = ws_manager.send(subscribe_msg)
-        if send_error:
-            return {"error": f"Failed to subscribe: {send_error}"}
+#     with ws_manager:
+#         send_error = ws_manager.send(subscribe_msg)
+#         if send_error:
+#             return {"error": f"Failed to subscribe: {send_error}"}
 
-        collected_messages = []
-        status_errors = []
-        end_time = time.time() + duration
+#         collected_messages = []
+#         status_errors = []
+#         end_time = time.time() + duration
 
-        # Loop until duration expires or we hit max_messages
-        while time.time() < end_time and len(collected_messages) < max_messages:
-            response = ws_manager.receive(timeout=0.5)  # non-blocking small timeout
-            if response is None:
-                continue  # idle timeout: no frame this tick
+#         # Loop until duration expires or we hit max_messages
+#         while time.time() < end_time and len(collected_messages) < max_messages:
+#             response = ws_manager.receive(timeout=0.5)  # non-blocking small timeout
+#             if response is None:
+#                 continue  # idle timeout: no frame this tick
 
-            msg_data = parse_json(response)
-            if not msg_data:
-                continue  # non-JSON or empty
+#             msg_data = parse_json(response)
+#             if not msg_data:
+#                 continue  # non-JSON or empty
 
-            # Check for status errors from rosbridge
-            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
-                status_errors.append(msg_data.get("msg", "Unknown error"))
-                continue
+#             # Check for status errors from rosbridge
+#             if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+#                 status_errors.append(msg_data.get("msg", "Unknown error"))
+#                 continue
 
-            # Check for published messages matching our topic
-            if msg_data.get("op") == "publish" and msg_data.get("topic") == topic:
-                collected_messages.append(msg_data.get("msg", {}))
+#             # Check for published messages matching our topic
+#             if msg_data.get("op") == "publish" and msg_data.get("topic") == topic:
+#                 collected_messages.append(msg_data.get("msg", {}))
 
-        # Unsubscribe when done
-        unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
-        ws_manager.send(unsubscribe_msg)
+#         # Unsubscribe when done
+#         unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+#         ws_manager.send(unsubscribe_msg)
 
-    return {
-        "topic": topic,
-        "collected_count": len(collected_messages),
-        "messages": collected_messages,
-        "status_errors": status_errors,  # Include any errors encountered during collection
-    }
+#     return {
+#         "topic": topic,
+#         "collected_count": len(collected_messages),
+#         "messages": collected_messages,
+#         "status_errors": status_errors,  # Include any errors encountered during collection
+#     }
 
 
 @mcp.tool(
@@ -1097,42 +1113,352 @@ def ping_robot(ip: str, port: int, ping_timeout: float = 2.0, port_timeout: floa
 ##                      IMAGE ANALYSIS
 ##
 ## ############################################################################################## ##
-@mcp.tool()
-def analyze_previously_received_image():
+
+# @mcp.tool(
+#     description=(
+#         "Analyze the most recently received image without sending raw bytes.\n"
+#         "This avoids exceeding token limits by returning only a file reference."
+#     )
+# )
+# def analyze_previously_received_image() -> dict:
+#     """
+#     Loads the previously saved image and returns a reference (URI), not base64 bytes.
+
+#     The image is saved by 'parse_image' or 'subscribe_once' at ./camera/received_image.png.
+#     The returned URI can be attached as a binary image input for analysis, avoiding token bloat.
+#     """
+#     path = "./camera/received_image.png"
+#     if not os.path.exists(path):
+#         return {"error": "No previously received image found at ./camera/received_image.png"}
+
+#     abs_path = os.path.abspath(path)
+#     return {
+#         "image_ref": {
+#             "uri": f"file://{abs_path}",
+#             "mimeType": "image/png",
+#             "name": "latest_camera_frame",
+#             "note": (
+#                 "Attach this file as an image input to the model instead of embedding base64 data."
+#             ),
+#         }
+#     }
+
+
+
+@mcp.tool(
+    description=(
+        "Get color image from D455 camera"
+    )
+)
+def get_image() -> dict:
     """
-    Analyze the received image.
-
-    This tool loads the previously saved image from './camera/received_image.png'
-    (which must have been created by 'parse_image' or 'subscribe_once'), and converts
-    it into an MCP-compatible ImageContent format so that the LLM can interpret it.
-    """
-    path = "./camera/received_image.png"
-    if not os.path.exists(path):
-        return {"error": "No previously received image found at ./camera/received_image.png"}
-    image = PILImage.open(path)
-    return _encode_image_to_imagecontent(image)
-
-
-def _encode_image_to_imagecontent(image):
-    """
-    Encodes a PIL Image to a format compatible with ImageContent.
-
-    Args:
-        image (PIL.Image.Image): The image to encode.
+    Get color image from D455 camera. Saves the file and loads it to client
 
     Returns:
-        ImageContent: PNG-encoded image wrapped in an ImageContent object.
+        dict:
+            - {"msg": <parsed ROS message>} of header, if successful
+            - {"error": "<error message>"} if subscription or timeout fails
     """
-    import io
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    img_bytes = buffer.getvalue()
-    img_obj = Image(data=img_bytes, format="png")
-    return img_obj.to_image_content()
+    # Validate critical args before attempting subscription
 
+    # Construct the rosbridge subscribe message
+    topic = '/rozum/D455_1/color/image_raw'
+    subscribe_msg: dict = {
+        "op": "subscribe",
+        "topic": topic,
+        "type": 'sensor_msgs/msg/Image',
+    }
+
+    # Add optional parameters if provided
+    subscribe_msg["queue_length"] = 1
+
+
+    # Subscribe and wait for the first message
+    with ws_manager:
+        # Send subscription request
+        send_error = ws_manager.send(subscribe_msg)
+        if send_error:
+            return {"error": f"Failed to subscribe: {send_error}"}
+
+        # Use default timeout if none specified
+        actual_timeout = 5.0
+
+        # Loop until we receive the first message or timeout
+        end_time = time.time() + actual_timeout
+        while time.time() < end_time:
+            response = ws_manager.receive(timeout=3.0)  # non-blocking small timeout
+            if response is None:
+                continue  # idle timeout: no frame this tick
+
+            msg_data, saved_file = parse_image(response)
+            if not msg_data:
+                continue  # non-JSON or empty
+
+            # Check for status errors from rosbridge
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                return {"error": f"Rosbridge error: {msg_data.get('msg', 'Unknown error')}"}
+
+            # Check for the first published message
+            if saved_file:
+                # Unsubscribe before returning the message
+                unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+                ws_manager.send(unsubscribe_msg)
+                
+                header = {"msg": msg_data.get("msg", {}).get("header", {})}
+                path = "./camera/received_image.png"
+                if not os.path.exists(path):
+                    return {"error": "No previously received image found at ./camera/received_image.png"}
+
+                abs_path = os.path.abspath(path)
+                return {
+                    "image_ref": {
+                        "uri": f"file://{abs_path}",
+                        "mimeType": "image/png",
+                        "name": "latest_camera_frame",
+                        "note": (
+                            "Attach this file as an image input to the model instead of embedding base64 data."
+                        ),
+                    },
+                    "msg_header":header
+                }
+
+        # Timeout - unsubscribe and return error
+        unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+        ws_manager.send(unsubscribe_msg)
+        return {"error": "Timeout waiting for message from topic"}
+    
+
+@mcp.tool(
+    description=(
+        "Get depth image from D455 camera"
+    )
+)
+def get_depth_image() -> dict:
+    """
+    Get depth image from D455 camera. Saves the file and loads it to client
+
+    Returns:
+        dict:
+            - {"msg": <parsed ROS message>} of header, if successful
+            - {"error": "<error message>"} if subscription or timeout fails
+    """
+    # Validate critical args before attempting subscription
+
+    # Construct the rosbridge subscribe message
+    topic = '/rozum/D455_1/aligned_depth_to_color/image_raw'
+    subscribe_msg: dict = {
+        "op": "subscribe",
+        "topic": topic,
+        "type": 'sensor_msgs/msg/Image',
+    }
+
+    # Add optional parameters if provided
+    subscribe_msg["queue_length"] = 1
+
+
+    # Subscribe and wait for the first message
+    with ws_manager:
+        # Send subscription request
+        send_error = ws_manager.send(subscribe_msg)
+        if send_error:
+            return {"error": f"Failed to subscribe: {send_error}"}
+
+        # Use default timeout if none specified
+        actual_timeout = 5.0
+
+        # Loop until we receive the first message or timeout
+        end_time = time.time() + actual_timeout
+        while time.time() < end_time:
+            response = ws_manager.receive(timeout=3.0)  # non-blocking small timeout
+            if response is None:
+                continue  # idle timeout: no frame this tick
+
+            msg_data, saved_file = parse_image(response)
+            if not msg_data:
+                continue  # non-JSON or empty
+
+            # Check for status errors from rosbridge
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                return {"error": f"Rosbridge error: {msg_data.get('msg', 'Unknown error')}"}
+
+            # Check for the first published message
+            if saved_file:
+                # Unsubscribe before returning the message
+                unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+                ws_manager.send(unsubscribe_msg)
+                
+                header = {"msg": msg_data.get("msg", {}).get("header", {})}
+                path = "./camera/received_image.png"
+                if not os.path.exists(path):
+                    return {"error": "No previously received image found at ./camera/received_image.png"}
+
+                abs_path = os.path.abspath(path)
+                return {
+                    "image_ref": {
+                        "uri": f"file://{abs_path}",
+                        "mimeType": "image/png",
+                        "name": "latest_camera_frame",
+                        "note": (
+                            "Attach this file as an image input to the model instead of embedding base64 data."
+                        ),
+                    },
+                    "msg_header":header
+                }
+
+        # Timeout - unsubscribe and return error
+        unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+        ws_manager.send(unsubscribe_msg)
+        return {"error": "Timeout waiting for message from topic"}
+
+def get_image_simple() -> dict:
+    """
+    Get color image from D455 camera. Saves the file and loads it to client
+
+    Returns:
+        dict:
+            - {"msg": <parsed ROS message>} of header, if successful
+            - {"error": "<error message>"} if subscription or timeout fails
+    """
+    # Validate critical args before attempting subscription
+
+    # Construct the rosbridge subscribe message
+    topic = '/rozum/D455_1/color/image_raw'
+    subscribe_msg: dict = {
+        "op": "subscribe",
+        "topic": topic,
+        "type": 'sensor_msgs/msg/Image',
+    }
+
+    # Add optional parameters if provided
+    subscribe_msg["queue_length"] = 1
+
+
+    # Subscribe and wait for the first message
+    for i in range(5): # 5 tries
+        with ws_manager:
+            # Send subscription request
+            send_error = ws_manager.send(subscribe_msg)
+            if send_error:
+                return {"error": f"Failed to subscribe: {send_error}"}
+
+            # Use default timeout if none specified
+            actual_timeout = 1.0
+
+            # Loop until we receive the first message or timeout
+            end_time = time.time() + actual_timeout
+            while time.time() < end_time:
+                response = ws_manager.receive(timeout=0.5)  # non-blocking small timeout
+                if response is None:
+                    continue  # idle timeout: no frame this tick
+
+                msg_data, saved_file = parse_image(response)
+                if not msg_data:
+                    continue  # non-JSON or empty
+
+                # Check for status errors from rosbridge
+                if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                    return {"error": f"Rosbridge error: {msg_data.get('msg', 'Unknown error')}"}
+
+                # Check for the first published message
+                if saved_file:
+                    # Unsubscribe before returning the message
+                    unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+                    ws_manager.send(unsubscribe_msg)
+                    
+                    header = {"msg": msg_data.get("msg", {}).get("header", {})}
+                    path = "./camera/received_image.png"
+                    if not os.path.exists(path):
+                        return {"error": "No previously received image found at ./camera/received_image.png"}
+
+                    abs_path = os.path.abspath(path)
+                    return {
+                        "image_ref": {
+                            "uri": f"file://{abs_path}",
+                            "mimeType": "image/png",
+                            "name": "latest_camera_frame",
+                            "note": (
+                                "Attach this file as an image input to the model instead of embedding base64 data."
+                            ),
+                        },
+                        "msg_header":header
+                    }
+
+            # Timeout - unsubscribe and return error
+            unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+            ws_manager.send(unsubscribe_msg)
+    return {"error": "Timeout waiting for message from topic"}
+# -------------------------------------------------------------------------------------------------
+# Optional utility if you ever want to compress images before sending
+# -------------------------------------------------------------------------------------------------
+def compress_image(
+    src_path: str,
+    dst_path: Optional[str] = None,
+    max_side: int = 1024,
+    quality: int = 75,
+) -> str:
+    """
+    Compress and resize an image to reduce size before analysis or upload.
+    Returns the destination path.
+    """
+    if dst_path is None:
+        dst_path = src_path
+
+    from PIL import ImageOps
+    im = PILImage.open(src_path).convert("RGB")
+    im = ImageOps.exif_transpose(im)
+    im.thumbnail((max_side, max_side))
+    im.save(dst_path, format="JPEG", quality=quality, optimize=True, progressive=True)
+    return dst_path
+
+# -------------------------------------------------------------------------------------------------
+# Entry point
+# -------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
-    transport = os.getenv("MCP_TRANSPORT", "stdio")  # "stdio" or "http"
+    # print(get_image_simple())
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
     if transport == "http":
         mcp.run(transport=transport)
     else:
         mcp.run(transport="stdio")
+
+
+
+# @mcp.tool()
+# def analyze_previously_received_image():
+#     """
+#     Analyze the received image.
+
+#     This tool loads the previously saved image from './camera/received_image.png'
+#     (which must have been created by 'parse_image' or 'subscribe_once'), and converts
+#     it into an MCP-compatible ImageContent format so that the LLM can interpret it.
+#     """
+#     path = "./camera/received_image.png"
+#     if not os.path.exists(path):
+#         return {"error": "No previously received image found at ./camera/received_image.png"}
+#     image = PILImage.open(path)
+#     return _encode_image_to_imagecontent(image)
+
+
+# def _encode_image_to_imagecontent(image):
+#     """
+#     Encodes a PIL Image to a format compatible with ImageContent.
+
+#     Args:
+#         image (PIL.Image.Image): The image to encode.
+
+#     Returns:
+#         ImageContent: PNG-encoded image wrapped in an ImageContent object.
+#     """
+#     import io
+#     buffer = io.BytesIO()
+#     image.save(buffer, format="PNG")
+#     img_bytes = buffer.getvalue()
+#     img_obj = Image(data=img_bytes, format="png")
+#     return img_obj.to_image_content()
+
+# if __name__ == "__main__":
+#     transport = os.getenv("MCP_TRANSPORT", "stdio")  # "stdio" or "http"
+#     if transport == "http":
+#         mcp.run(transport=transport)
+#     else:
+#         mcp.run(transport="stdio")
