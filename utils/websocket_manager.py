@@ -6,7 +6,7 @@ from typing import Optional, Union, Tuple
 import base64
 import numpy as np
 import websocket
-
+import cv2
 
 def parse_json(raw: Optional[Union[str, bytes]]) -> Optional[dict]:
     """
